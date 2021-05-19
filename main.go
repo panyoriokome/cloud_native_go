@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/gorilla/mux"
@@ -113,7 +115,84 @@ func Get(key string) (string, error) {
 
 func Delete(key string) error {
 	store.Lock()
-	delete(store, key)
+	// delete(store, key)
+	delete(store.m, key)
+	store.Unlock()
 
 	return nil
+}
+
+type TransactionLogger interface {
+	WriteDelete(key string)
+	WritePut(key, value string)
+}
+
+type EventType byte
+
+const (
+	_                     = iota
+	EventDelete EventType = iota
+	EventPut
+)
+
+type Event struct {
+	Sequence  uint64
+	EventType EventType
+	Key       string
+	Value     string
+}
+
+type FileTransactionLogger struct {
+	// something
+	events       chan<- Event
+	errors       <-chan error
+	lastSequence uint64
+	file         *os.File
+}
+
+func (I *FileTransactionLogger) WritePut(key, value string) {
+	// something
+	I.events <- Event{EventType: EventPut, Key: key, Value: value}
+}
+
+func (I *FileTransactionLogger) WriteDelete(key, value string) {
+	// something
+	I.events <- Event{EventType: EventDelete, Key: key}
+}
+
+func (I *FileTransactionLogger) Err() <-chan error {
+	return I.errors
+}
+
+func NewFileTransactionLogger(filename string) (TransactionLogger, error) {
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open transaction log file: %w", err)
+	}
+	return &FileTransactionLogger{file: file}, nil
+}
+
+func (I *FileTransactionLogger) Run() {
+	events := make(chan Event, 16)
+	I.events = events
+
+	errors := make(chan error, 1)
+	I.errors = errors
+
+	go func() {
+		for e := range events {
+			I.lastSequence++
+
+			_, err := fmt.Fprintf(
+				I.file,
+				"%d\t%d\t%s\t\n",
+				I.lastSequence, e.EventType, e.Key, e.Value,
+			)
+
+			if err != nil {
+				errors <- err
+				return
+			}
+		}
+	}()
 }
